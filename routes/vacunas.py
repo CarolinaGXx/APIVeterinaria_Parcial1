@@ -17,7 +17,7 @@ async def registrar_vacuna(vacuna: VacunaCreate):
     if not mascota:
         raise HTTPException(status_code=400, detail="La mascota especificada no existe")
     
-    nueva_vacuna = Vacuna(id=obtener_proximo_id_vacuna(), **vacuna.dict())
+    nueva_vacuna = Vacuna(id=obtener_proximo_id_vacuna(), **vacuna.model_dump())
     vacunas_db.append(nueva_vacuna)
     return nueva_vacuna
 
@@ -56,7 +56,7 @@ async def actualizar_vacuna(vacuna_id: int, vacuna_update: VacunaUpdate):
     if vacuna_update.mascota_id and not encontrar_mascota(vacuna_update.mascota_id):
         raise HTTPException(status_code=400, detail="La mascota especificada no existe")
     
-    update_data = vacuna_update.dict(exclude_unset=True)
+    update_data = vacuna_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(vacuna, field, value)
     

@@ -35,7 +35,7 @@ async def crear_factura(factura: FacturaCreate):
     nueva_factura = Factura(
         id=factura_id,
         numero_factura=generar_numero_factura(factura_id),
-        **factura.dict(),
+        **factura.model_dump(),
         fecha_factura=datetime.now(),
         estado=EstadoFactura.pendiente,
         total=total,
@@ -105,7 +105,7 @@ async def actualizar_factura(factura_id: int, factura_update: FacturaUpdate):
     if factura_update.cita_id and not encontrar_cita(factura_update.cita_id):
         raise HTTPException(status_code=400, detail="La cita especificada no existe")
     
-    update_data = factura_update.dict(exclude_unset=True)
+    update_data = factura_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(factura, field, value)
     
