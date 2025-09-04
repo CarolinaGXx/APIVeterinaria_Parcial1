@@ -12,7 +12,7 @@ router = APIRouter(prefix="/mascotas", tags=["mascotas"])
 @router.post("/", response_model=Mascota, status_code=201)
 async def crear_mascota(mascota: MascotaCreate):
     """Crear una nueva mascota"""
-    nueva_mascota = Mascota(id=obtener_proximo_id_mascota(), **mascota.dict())
+    nueva_mascota = Mascota(id=obtener_proximo_id_mascota(), **mascota.model_dump())
     mascotas_db.append(nueva_mascota)
     return nueva_mascota
 
@@ -63,7 +63,7 @@ async def actualizar_mascota(mascota_id: int, mascota_update: MascotaUpdate):
         raise HTTPException(status_code=404, detail="Mascota no encontrada")
     
     # Actualizar solo los campos proporcionados
-    update_data = mascota_update.dict(exclude_unset=True)
+    update_data = mascota_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(mascota, field, value)
     

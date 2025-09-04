@@ -20,7 +20,7 @@ async def agendar_cita(cita: CitaCreate):
     
     nueva_cita = Cita(
         id=obtener_proximo_id_cita(),
-        **cita.dict(),
+        **cita.model_dump(),
         estado=EstadoCita.pendiente,
         fecha_creacion=datetime.now()
     )
@@ -62,7 +62,7 @@ async def actualizar_cita(cita_id: int, cita_update: CitaUpdate):
     if cita_update.mascota_id and not encontrar_mascota(cita_update.mascota_id):
         raise HTTPException(status_code=400, detail="La mascota especificada no existe")
     
-    update_data = cita_update.dict(exclude_unset=True)
+    update_data = cita_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(cita, field, value)
     
