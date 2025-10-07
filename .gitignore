@@ -1,0 +1,85 @@
+/.env
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+.eggs/
+*.egg-info/
+.installed.cfg
+lib/ 
+lib64/
+parts/
+sdist/
+var/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# dotenv env files
+.env
+.env.*
+
+# SQLite DBs
+*.db
+*.sqlite3
+
+# Pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# Logs
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Editor swap
+*.swp
+
+# Uvicorn / gunicorn pid/log files
+*.pid
+
+# Misc
+*.bak
+*.tmp
+
+# Ignore local secrets or overrides
+secrets.env
+local.env
+
+# Avoid committing sensitive pip cache or wheelhouse
+pip-wheel-metadata/
+
+# Node (if any frontend added)
+node_modules/
+
+# Ignore coverage reports
+coverage.xml
+
+# Keep alembic itself tracked - migrations live in alembic/versions
+# (We intentionally do NOT ignore alembic/ unless you want to exclude generated revision files.)

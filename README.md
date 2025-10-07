@@ -4,6 +4,8 @@
 
 API Veterinaria – Parcial 1 Aplicaciones y Servicios Web
 
+Este README está actualizado para el estado actual del repositorio (FastAPI + SQLAlchemy + Alembic).
+
 **2. Descripción General**
 
 Esta API RESTful permite gestionar de forma digital los procesos más comunes en una veterinaria: registrar mascotas (perros, gatos y aves), aplicar y consultar vacunas, agendar o cancelar citas y generar facturas de las consultas realizadas. Integra validación de datos con Pydantic, manejo adecuado de códigos HTTP y documentación automática con FastAPI (Swagger UI y ReDoc).
