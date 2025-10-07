@@ -1,19 +1,22 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import os
 import uvicorn
+import logging
 
-# Importar routers
 from routes import (
     mascotas_router,
     citas_router,
     vacunas_router,
-    facturas_router
+    facturas_router,
+    usuarios_router,
+    recetas_router,
 )
 
-# Importar routers adicionales para endpoints cruzados
-from routes.mascotas import mascotas_vacunas_router
 from routes.facturas import mascotas_facturas_router
 
-# Inicializar FastAPI
+from database.db import create_tables
+
 app = FastAPI(
     title="API Veterinaria",
     description="Sistema de gestión veterinaria para mascotas",
@@ -22,7 +25,33 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Endpoint raíz
+_allowed = os.getenv("CORS_ALLOWED_ORIGINS")
+if _allowed:
+    ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
+else:
+    ALLOWED_ORIGINS = [
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        create_tables()
+    except Exception as e:
+        logger = logging.getLogger("apiveterinaria.startup")
+        logging.basicConfig(level=logging.INFO)
+        logger.warning("No se pudieron crear tablas en la base de datos: %s", e)
+
 @app.get("/")
 async def root():
     return {
@@ -33,17 +62,18 @@ async def root():
         "redoc": "/redoc"
     }
 
-# Incluir routers principales
 app.include_router(mascotas_router)
 app.include_router(citas_router)
 app.include_router(vacunas_router)
 app.include_router(facturas_router)
+app.include_router(usuarios_router)
+app.include_router(recetas_router)
 
-# Incluir routers para endpoints cruzados
-app.include_router(mascotas_vacunas_router)
+from routes.auth import router as auth_router
+app.include_router(auth_router)
+
 app.include_router(mascotas_facturas_router)
 
-# Endpoint de health check
 @app.get("/health")
 async def health_check():
     return {
@@ -52,7 +82,6 @@ async def health_check():
         "version": "1.0.0"
     }
 
-# Ejecutar la aplicación
 if __name__ == "__main__":
     uvicorn.run(
         app, 
