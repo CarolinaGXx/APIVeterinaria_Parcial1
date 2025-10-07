@@ -1,86 +1,148 @@
-from typing import List, Optional
+from typing import Optional
 from datetime import datetime
-from models import (
-    Mascota, Cita, Vacuna, Factura,
-    EstadoCita, EstadoFactura
+from uuid import uuid4, UUID
+import os
+import urllib.parse
+import hashlib
+
+try:
+    # use dynamic import so static analyzers don't require the package to be installed
+    import importlib
+
+    _dotenv = importlib.import_module("dotenv")
+    _DOTENV_AVAILABLE = True
+except Exception:
+    _DOTENV_AVAILABLE = False
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+# Import ORM classes and Base from models.py
+from .models import (
+    Base,
+    UsuarioORM,
+    MascotaORM,
+    CitaORM,
+    VacunaORM,
+    FacturaORM,
+    RecetaORM,
+    RecetaLineaORM,
 )
 
-# Base de datos simulada
-mascotas_db: List[Mascota] = []
-citas_db: List[Cita] = []
-vacunas_db: List[Vacuna] = []
-facturas_db: List[Factura] = []
+# Load .env for local development if python-dotenv is installed
+if _DOTENV_AVAILABLE:
+    try:
+        _dotenv.load_dotenv()
+    except Exception:
+        pass
 
-# Contadores para IDs
-mascota_id_counter = 1
-cita_id_counter = 1
-vacuna_id_counter = 1
-factura_id_counter = 1
+# Engine / session
+# If DATABASE_URL env var is set, use it; otherwise fall back to previous SQL Server default
+params = urllib.parse.quote_plus(
+    "DRIVER={ODBC Driver 17 for SQL Server};SERVER=SANTIAGO\\SQLEXPRESS;DATABASE=APIVeterinaria;Trusted_Connection=yes;"
+)
+DATABASE_URL = os.getenv("DATABASE_URL") or ("mssql+pyodbc:///?odbc_connect=" + params)
 
-# Funciones auxiliares para encontrar registros
-def encontrar_mascota(mascota_id: int) -> Optional[Mascota]:
-    """Encuentra una mascota por su ID"""
-    for mascota in mascotas_db:
-        if mascota.id == mascota_id:
-            return mascota
-    return None
+engine = create_engine(DATABASE_URL, echo=False, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-def encontrar_cita(cita_id: int) -> Optional[Cita]:
-    """Encuentra una cita por su ID"""
-    for cita in citas_db:
-        if cita.id == cita_id:
-            return cita
-    return None
 
-def encontrar_vacuna(vacuna_id: int) -> Optional[Vacuna]:
-    """Encuentra una vacuna por su ID"""
-    for vacuna in vacunas_db:
-        if vacuna.id == vacuna_id:
-            return vacuna
-    return None
+def get_db():
+    """Dependencia de FastAPI que provee una sesión y la cierra al terminar."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
-def encontrar_factura(factura_id: int) -> Optional[Factura]:
-    """Encuentra una factura por su ID"""
-    for factura in facturas_db:
-        if factura.id == factura_id:
-            return factura
-    return None
 
-def generar_numero_factura(factura_id: int) -> str:
-    """Genera un número de factura con formato FAC-YYYY-NNNN"""
+def create_tables():
+    """Crear tablas ORM en la base de datos SQL Server (o la DB configurada)."""
+    Base.metadata.create_all(bind=engine)
+
+
+def generar_numero_factura_uuid(factura_uuid: str) -> str:
     año_actual = datetime.now().year
-    return f"FAC-{año_actual}-{factura_id:04d}"
+    short = factura_uuid.replace("-", "")[:8].upper()
+    return f"FAC-{año_actual}-{short}"
 
-def calcular_total_factura(valor_servicio: float, iva: float, descuento: float) -> float:
-    """Calcula el total de la factura aplicando IVA y descuento"""
-    subtotal = valor_servicio - descuento
-    total = subtotal + (subtotal * iva / 100)
-    return round(total, 2)
 
-def obtener_proximo_id_mascota() -> int:
-    """Obtiene el próximo ID disponible para mascotas"""
-    global mascota_id_counter
-    current_id = mascota_id_counter
-    mascota_id_counter += 1
-    return current_id
+def uuid_to_str(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, UUID):
+        return str(value)
+    return str(value)
 
-def obtener_proximo_id_cita() -> int:
-    """Obtiene el próximo ID disponible para citas"""
-    global cita_id_counter
-    current_id = cita_id_counter
-    cita_id_counter += 1
-    return current_id
 
-def obtener_proximo_id_vacuna() -> int:
-    """Obtiene el próximo ID disponible para vacunas"""
-    global vacuna_id_counter
-    current_id = vacuna_id_counter
-    vacuna_id_counter += 1
-    return current_id
+def get_database_url() -> str:
+    try:
+        return str(engine.url)
+    except Exception:
+        return DATABASE_URL
 
-def obtener_proximo_id_factura() -> int:
-    """Obtiene el próximo ID disponible para facturas"""
-    global factura_id_counter
-    current_id = factura_id_counter
-    factura_id_counter += 1
-    return current_id
+
+def ensure_usuario_exists(user_id: Optional[str]) -> bool:
+    """Verifica si un usuario existe en la tabla usuarios (no crea usuarios)."""
+    if not user_id:
+        return False
+    user_id_str = str(user_id)
+    db = None
+    try:
+        db = SessionLocal()
+        u = db.get(UsuarioORM, user_id_str)
+        return u is not None
+    except Exception:
+        if db:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        if db:
+            db.close()
+
+
+def hash_password(password: str) -> tuple[str, str]:
+    """Genera salt y hash (ambos hex) usando PBKDF2-HMAC-SHA256."""
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+    return salt.hex(), dk.hex()
+
+
+def verify_password(salt_hex: str, hash_hex: str, password: str) -> bool:
+    """Verifica que password coincida con salt+hash almacenados."""
+    salt = bytes.fromhex(salt_hex)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+    return dk.hex() == hash_hex
+
+
+def set_audit_fields(obj, user_id: Optional[str], creating: bool = True):
+    """Helper para setear campos de auditoría en una instancia ORM.
+
+    - obj: instancia ORM
+    - user_id: id del usuario responsable (puede ser None)
+    - creating: si True setea id_usuario_creacion y fecha_creacion
+                si False setea id_usuario_actualizacion y fecha_actualizacion
+    """
+    now = datetime.utcnow()
+    try:
+        if creating:
+            if hasattr(obj, "id_usuario_creacion"):
+                obj.id_usuario_creacion = user_id
+            if hasattr(obj, "fecha_creacion") and (
+                getattr(obj, "fecha_creacion", None) is None
+            ):
+                obj.fecha_creacion = now
+        # siempre setear actualización
+        if hasattr(obj, "id_usuario_actualizacion"):
+            obj.id_usuario_actualizacion = user_id
+        if hasattr(obj, "fecha_actualizacion"):
+            obj.fecha_actualizacion = now
+    except Exception:
+        # no fallar por auditoría
+        pass
