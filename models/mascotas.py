@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum
+from uuid import UUID
 
 class TipoMascota(str, Enum):
     perro = "perro"
@@ -13,10 +14,11 @@ class MascotaBase(BaseModel):
     raza: str = Field(..., min_length=1, max_length=50)
     edad: int = Field(..., ge=0, le=30)
     peso: float = Field(..., gt=0)
-    propietario: str = Field(..., min_length=1, max_length=100)
-    telefono_propietario: str = Field(..., min_length=7, max_length=15)
+
 
 class MascotaCreate(MascotaBase):
+    """Modelo de entrada para crear mascota. No incluye `propietario` porque
+    éste se infiere del usuario autenticado en el endpoint."""
     pass
 
 class MascotaUpdate(BaseModel):
@@ -25,8 +27,8 @@ class MascotaUpdate(BaseModel):
     raza: Optional[str] = Field(None, min_length=1, max_length=50)
     edad: Optional[int] = Field(None, ge=0, le=30)
     peso: Optional[float] = Field(None, gt=0)
-    propietario: Optional[str] = Field(None, min_length=1, max_length=100)
-    telefono_propietario: Optional[str] = Field(None, min_length=7, max_length=15)
 
 class Mascota(MascotaBase):
-    id: int
+    id_mascota: UUID
+    propietario: str
+    telefono_propietario: Optional[str] = None
