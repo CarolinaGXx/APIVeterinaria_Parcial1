@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 from enum import Enum
+from uuid import UUID
 
 class EstadoCita(str, Enum):
     pendiente = "pendiente"
@@ -9,7 +10,7 @@ class EstadoCita(str, Enum):
     cancelada = "cancelada"
 
 class CitaBase(BaseModel):
-    mascota_id: int
+    id_mascota: UUID
     fecha: datetime
     motivo: str = Field(..., min_length=1, max_length=200)
     veterinario: str = Field(..., min_length=1, max_length=100)
@@ -18,13 +19,14 @@ class CitaCreate(CitaBase):
     pass
 
 class CitaUpdate(BaseModel):
-    mascota_id: Optional[int] = None
     fecha: Optional[datetime] = None
     motivo: Optional[str] = Field(None, min_length=1, max_length=200)
     veterinario: Optional[str] = Field(None, min_length=1, max_length=100)
-    estado: Optional[EstadoCita] = None
 
 class Cita(CitaBase):
-    id: int
+    id_cita: UUID
     estado: EstadoCita = EstadoCita.pendiente
-    fecha_creacion: datetime
+    mascota_nombre: str
+    propietario_username: Optional[str] = None
+    propietario_nombre: Optional[str] = None
+    propietario_telefono: Optional[str] = None
