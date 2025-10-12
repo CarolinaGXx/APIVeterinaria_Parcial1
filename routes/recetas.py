@@ -434,7 +434,6 @@ async def eliminar_receta(
             raise HTTPException(
                 status_code=403, detail="No autorizado para eliminar esta receta"
             )
-        # eliminar lineas
         db.query(RecetaLineaORM).filter(RecetaLineaORM.id_receta == r.id).delete()
         db.delete(r)
         db.commit()

@@ -361,6 +361,3 @@ async def eliminar_mascota(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail=f"Error al eliminar mascota: {e}")
-
-
-# vacunas endpoints are served by the vacunas router
