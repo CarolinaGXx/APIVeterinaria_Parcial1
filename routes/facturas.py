@@ -181,9 +181,6 @@ async def crear_factura(
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
-        # Try to include propietario (owner) details in the POST response,
-        # for parity with the GET endpoints which enrich the response with
-        # propietario_username, propietario_nombre and propietario_telefono.
         owner = None
         if mascota and getattr(mascota, "propietario", None):
             owner = (

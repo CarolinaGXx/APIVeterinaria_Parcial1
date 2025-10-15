@@ -29,11 +29,9 @@ class FacturaBase(BaseModel):
     descuento: float = Field(0, ge=0)
 
 class FacturaCreate(BaseModel):
-    # id_mascota is intentionally omitted: it will be inferred from the cita (appointment)
     id_cita: UUID
     tipo_servicio: TipoServicio
     descripcion: str = Field(..., min_length=1, max_length=500)
-    # veterinarian is inferred from the authenticated user; do not accept in the request
     valor_servicio: float = Field(..., gt=0)
     iva: float = Field(..., ge=0)
     descuento: float = Field(0, ge=0)
