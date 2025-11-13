@@ -17,8 +17,7 @@ class MascotaBase(BaseModel):
 
 
 class MascotaCreate(MascotaBase):
-    """Modelo de entrada para crear mascota. No incluye `propietario` porque
-    éste se infiere del usuario autenticado en el endpoint."""
+    """Modelo de entrada para crear mascota"""
     pass
 
 class MascotaUpdate(BaseModel):
@@ -31,4 +30,7 @@ class MascotaUpdate(BaseModel):
 class Mascota(MascotaBase):
     id_mascota: UUID
     propietario: str
+    propietario_nombre: Optional[str] = None
+    propietario_telefono: Optional[str] = None
     telefono_propietario: Optional[str] = None
+    is_deleted: bool = False
