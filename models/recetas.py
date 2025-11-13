@@ -48,3 +48,4 @@ class RecetaSummary(BaseModel):
     propietario_username: Optional[str] = None
     propietario_nombre: Optional[str] = None
     propietario_telefono: Optional[str] = None
+

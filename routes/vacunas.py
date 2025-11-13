@@ -1,250 +1,249 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
-from typing import List, Optional
-from uuid import UUID
-from enum import Enum as _PyEnum
+"""
+Vacuna routes (Controllers) - Layered Architecture.
 
-from models import Vacuna, VacunaCreate, VacunaUpdate, TipoVacuna
-from database import VacunaORM, MascotaORM, UsuarioORM, uuid_to_str
+This module handles HTTP requests/responses for vacuna endpoints.
+All business logic is delegated to the VacunaService layer.
+"""
+
+from fastapi import APIRouter, HTTPException, Depends, Query, status
+from typing import Optional
+from datetime import datetime, date
+import logging
+
+from models.vacunas import Vacuna, VacunaCreate, VacunaUpdate, TipoVacuna
+from models.common import create_delete_response
+from core.pagination import create_paginated_response
+from core.exceptions import (
+    AppException,
+    NotFoundException,
+    ForbiddenException,
+    BusinessException,
+    ValidationException,
+)
+from services.vacuna_service import VacunaService
 from database.db import get_db
 from sqlalchemy.orm import Session
 from auth import get_current_user_dep, require_roles
+from config import settings
 
-"""
-Rutas para gestión de vacunas.
-
-Incluye registro, listado, obtención por id, actualización y eliminación de
-registros de vacunación. Permisos basados en roles y en la relación
-propietario-mascota.
-"""
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/vacunas", tags=["vacunas"])
 
 
-def _enum_to_value(v):
-    if isinstance(v, _PyEnum):
-        return v.value
-    return v
+# ==================== Dependency Injection ====================
+
+def get_vacuna_service(db: Session = Depends(get_db)) -> VacunaService:
+    """Inject VacunaService with its dependencies."""
+    from repositories.vacuna_repository import VacunaRepository
+    from repositories.mascota_repository import MascotaRepository
+    from repositories.usuario_repository import UsuarioRepository
+    
+    vacuna_repo = VacunaRepository(db)
+    mascota_repo = MascotaRepository(db)
+    usuario_repo = UsuarioRepository(db)
+    
+    return VacunaService(vacuna_repo, mascota_repo, usuario_repo)
 
 
-def _normalize_stored_tipo_vacuna(s: str):
-    """Normaliza valores de tipo_vacuna almacenados en la BD.
+# ==================== Exception Handler ====================
 
-    Convierte por ejemplo 'TipoVacuna.raza' -> 'raza' si procede.
-    """
-    if s is None:
-        return s
-    if isinstance(s, str) and "." in s:
-        return s.split(".", 1)[1]
-    return s
-
-
-def _validate_uuid(id_str: str, name: str) -> str:
-    """Validar que id_str sea un UUID válido y devolverlo como string.
-
-    Lanza HTTPException(400) si no es un UUID válido.
-    """
-    try:
-        UUID(str(id_str))
-        return str(id_str)
-    except Exception:
-        raise HTTPException(
-            status_code=400, detail=f"{name} inválido: debe ser un UUID"
+def handle_service_exception(e: Exception) -> HTTPException:
+    """Convert service layer exceptions to HTTP exceptions."""
+    if isinstance(e, NotFoundException):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=e.message
         )
-
-
-@router.post("/", response_model=Vacuna, status_code=201)
-async def registrar_vacuna(
-    vacuna: VacunaCreate, current_user=Depends(require_roles("veterinario", "admin")), db: Session = Depends(get_db)
-):
-    """Registrar una nueva vacuna.
-
-    Solo veterinarios o administradores pueden crear registros de vacunación.
-    El veterinario se toma del usuario autenticado.
-    """
-    data = vacuna.model_dump()
-    try:
-        mascota = db.get(MascotaORM, uuid_to_str(data["id_mascota"]))
-        if not mascota:
-            raise HTTPException(
-                status_code=400, detail="La mascota especificada no existe"
-            )
-
-        vet_username = current_user.username
-
-        db_obj = VacunaORM(
-            id_mascota=uuid_to_str(data["id_mascota"]),
-            tipo_vacuna=_enum_to_value(data["tipo_vacuna"]),
-            fecha_aplicacion=data["fecha_aplicacion"],
-            veterinario=vet_username,
-            lote_vacuna=data["lote_vacuna"],
-            proxima_dosis=data.get("proxima_dosis"),
+    elif isinstance(e, ForbiddenException):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=e.message
         )
-        from database.db import set_audit_fields
-
-        set_audit_fields(db_obj, current_user.id, creating=True)
-        db.add(db_obj)
-        db.commit()
-        db.refresh(db_obj)
-        owner = None
-        if mascota and mascota.propietario:
-            owner = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == mascota.propietario)
-                .one_or_none()
-            )
-        return {
-            "id_vacuna": db_obj.id,
-            "id_mascota": db_obj.id_mascota,
-            "mascota_nombre": mascota.nombre,
-            "propietario_username": (
-                owner.username if owner else (mascota.propietario if mascota else None)
-            ),
-            "propietario_nombre": owner.nombre if owner else None,
-            "propietario_telefono": owner.telefono if owner else None,
-            "tipo_vacuna": _normalize_stored_tipo_vacuna(db_obj.tipo_vacuna),
-            "fecha_aplicacion": db_obj.fecha_aplicacion,
-            "veterinario": db_obj.veterinario,
-            "lote_vacuna": db_obj.lote_vacuna,
-            "proxima_dosis": db_obj.proxima_dosis,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/", response_model=List[Vacuna])
-async def obtener_vacunas(
-    tipo_vacuna: Optional[TipoVacuna] = Query(
-        None, description="Filtrar por tipo de vacuna"
-    ),
-    veterinario: Optional[str] = Query(None, description="Filtrar por veterinario"),
-    current_user=Depends(get_current_user_dep),
-    db: Session = Depends(get_db),
-):
-    """Listar vacunas según filtros y permisos del usuario.
-
-    Reglas de visibilidad similares a citas: admin ve todo; veterinario ve
-    vacunas asignadas a él o de mascotas que posee; cliente ve solo vacunas
-    de sus mascotas.
-    """
-    q = db.query(VacunaORM)
-    if tipo_vacuna:
-        q = q.filter(VacunaORM.tipo_vacuna == _enum_to_value(tipo_vacuna))
-    if veterinario:
-        q = q.filter(VacunaORM.veterinario.ilike(f"%{veterinario}%"))
-
-    if current_user.role == "admin":
-        pass
-    elif current_user.role == "veterinario":
-        from sqlalchemy import or_
-
-        q = q.join(MascotaORM, VacunaORM.id_mascota == MascotaORM.id).filter(
-            or_(
-                VacunaORM.veterinario == current_user.username,
-                MascotaORM.propietario == current_user.username,
-            )
+    elif isinstance(e, ValidationException):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=e.message
+        )
+    elif isinstance(e, BusinessException):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=e.message
+        )
+    elif isinstance(e, AppException):
+        return HTTPException(
+            status_code=e.status_code,
+            detail=e.message
         )
     else:
-        q = q.join(MascotaORM, VacunaORM.id_mascota == MascotaORM.id).filter(
-            MascotaORM.propietario == current_user.username
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        return HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
         )
 
-    resultados = q.all()
-    mascota_ids = list({r.id_mascota for r in resultados})
-    mascotas_map = {}
-    owners_map = {}
-    if mascota_ids:
-        mascotas = db.query(MascotaORM).filter(MascotaORM.id.in_(mascota_ids)).all()
-        mascotas_map = {m.id: m for m in mascotas}
-        owner_usernames = list({m.propietario for m in mascotas if m.propietario})
-        if owner_usernames:
-            users = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username.in_(owner_usernames))
-                .all()
-            )
-            owners_map = {u.username: u for u in users}
-    resp = []
-    for r in resultados:
-        m = mascotas_map.get(r.id_mascota)
-        owner = None
-        if m and m.propietario:
-            owner = owners_map.get(m.propietario)
-        resp.append(
-            {
-                "id_vacuna": r.id,
-                "id_mascota": r.id_mascota,
-                "mascota_nombre": m.nombre if m else None,
-                "propietario_username": (
-                    owner.username if owner else (m.propietario if m else None)
-                ),
-                "propietario_nombre": owner.nombre if owner else None,
-                "propietario_telefono": owner.telefono if owner else None,
-                "tipo_vacuna": _normalize_stored_tipo_vacuna(r.tipo_vacuna),
-                "fecha_aplicacion": r.fecha_aplicacion,
-                "veterinario": r.veterinario,
-                "lote_vacuna": r.lote_vacuna,
-                "proxima_dosis": r.proxima_dosis,
-            }
-        )
-    return resp
-    
-    
-@router.get("/{vacuna_id}", response_model=Vacuna)
-async def obtener_vacuna(vacuna_id: str, current_user=Depends(get_current_user_dep), db: Session = Depends(get_db)):
-    """Obtener una vacuna por id.
 
-    Acceso permitido para admin, propietario de la mascota o veterinario asignado.
+# ==================== Endpoints ====================
+
+@router.post("/", response_model=Vacuna, status_code=status.HTTP_201_CREATED)
+async def registrar_vacuna(
+    vacuna: VacunaCreate,
+    current_user=Depends(require_roles("veterinario", "admin")),
+    service: VacunaService = Depends(get_vacuna_service),
+):
+    """
+    Register a new vacuna.
+    
+    Only veterinarios or admins can register vaccines.
+    The veterinario field is automatically set to the current user.
+    
+    Args:
+        vacuna: Vacuna creation data
+        current_user: Current authenticated user (veterinario or admin)
+        service: Injected VacunaService
+        
+    Returns:
+        Created vacuna
     """
     try:
-        vid = _validate_uuid(vacuna_id, "vacuna_id")
-        r = db.get(VacunaORM, vid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Vacuna no encontrada")
-        m = db.get(MascotaORM, r.id_mascota)
-        if current_user.role == "admin":
-            pass
-        elif current_user.role == "veterinario":
-            if r.veterinario != current_user.username and (
-                not m or m.propietario != current_user.username
-            ):
-                raise HTTPException(
-                    status_code=403, detail="No autorizado para ver esta vacuna"
-                )
-        else:
-            if not m or m.propietario != current_user.username:
-                raise HTTPException(
-                    status_code=403, detail="No autorizado para ver esta vacuna"
-                )
-        owner = None
-        if m and m.propietario:
-            owner = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == m.propietario)
-                .one_or_none()
-            )
-        return {
-            "id_vacuna": r.id,
-            "id_mascota": r.id_mascota,
-            "mascota_nombre": m.nombre if m else None,
-            "propietario_username": (
-                owner.username if owner else (m.propietario if m else None)
-            ),
-            "propietario_nombre": owner.nombre if owner else None,
-            "propietario_telefono": owner.telefono if owner else None,
-            "tipo_vacuna": _normalize_stored_tipo_vacuna(r.tipo_vacuna),
-            "fecha_aplicacion": r.fecha_aplicacion,
-            "veterinario": r.veterinario,
-            "lote_vacuna": r.lote_vacuna,
-            "proxima_dosis": r.proxima_dosis,
-        }
-    finally:
-        pass
+        return service.create_vacuna(vacuna, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error creating vacuna: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al registrar vacuna"
+        )
+
+
+@router.get("/")
+async def obtener_vacunas(
+    page: int = Query(0, ge=0, description="Número de página (0-indexed)"),
+    page_size: int = Query(
+        settings.default_page_size,
+        ge=1,
+        le=settings.max_page_size,
+        description="Tamaño de página"
+    ),
+    tipo_vacuna: Optional[TipoVacuna] = Query(None, description="Filtrar por tipo de vacuna"),
+    veterinario: Optional[str] = Query(None, description="Filtrar por veterinario (búsqueda parcial)"),
+    id_mascota: Optional[str] = Query(None, description="Filtrar por ID de mascota"),
+    mascota_nombre: Optional[str] = Query(None, description="Filtrar por nombre de mascota (búsqueda parcial)"),
+    include_deleted: bool = Query(False, description="Incluir vacunas eliminadas (solo admin)"),
+    current_user=Depends(get_current_user_dep),
+    service: VacunaService = Depends(get_vacuna_service),
+):
+    """
+    List vacunas with pagination and filters.
+    
+    Filters are applied BEFORE pagination, so results span all pages.
+    Results are ordered by fecha_aplicacion DESC (most recent first).
+    
+    Visibility rules:
+    - admin: sees all vacunas, can include deleted
+    - veterinario: sees all vacunas, cannot include deleted
+    - cliente: sees only vacunas for their own pets
+    
+    Args:
+        page: Page number (0-indexed)
+        page_size: Items per page
+        tipo_vacuna: Optional tipo_vacuna filter
+        veterinario: Optional veterinario filter (partial match)
+        id_mascota: Optional mascota ID filter
+        mascota_nombre: Optional mascota name filter (partial match)
+        include_deleted: Include soft-deleted vacunas (admin only)
+        current_user: Current authenticated user
+        service: Injected VacunaService
+        
+    Returns:
+        Paginated list of vacunas
+    """
+    try:
+        # Only admin can view deleted vacunas
+        if include_deleted and current_user.role != "admin":
+            include_deleted = False
+        
+        tipo_str = tipo_vacuna.value if tipo_vacuna else None
+        items, total = service.get_vacunas(
+            current_user=current_user,
+            page=page,
+            page_size=page_size,
+            tipo_vacuna=tipo_str,
+            veterinario=veterinario,
+            id_mascota=id_mascota,
+            mascota_nombre=mascota_nombre,
+            include_deleted=include_deleted
+        )
+        return create_paginated_response(items, page, page_size, total)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error listing vacunas: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al listar vacunas"
+        )
+
+
+@router.get("/proximas-dosis")
+async def obtener_proximas_dosis(
+    fecha_limite: Optional[date] = Query(None, description="Fecha límite"),
+    current_user=Depends(get_current_user_dep),
+    service: VacunaService = Depends(get_vacuna_service),
+):
+    """
+    Get vacunas with upcoming next doses.
+    
+    Args:
+        fecha_limite: Optional date limit
+        current_user: Current authenticated user
+        service: Injected VacunaService
+        
+    Returns:
+        List of vacunas with upcoming doses
+    """
+    try:
+        return service.get_proximas_dosis(current_user, fecha_limite)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error getting proximas dosis: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener próximas dosis"
+        )
+
+
+@router.get("/{vacuna_id}", response_model=Vacuna)
+async def obtener_vacuna(
+    vacuna_id: str,
+    current_user=Depends(get_current_user_dep),
+    service: VacunaService = Depends(get_vacuna_service),
+):
+    """
+    Get a vacuna by ID.
+    
+    Access allowed for admin, pet owner, or veterinarios.
+    
+    Args:
+        vacuna_id: Vacuna ID
+        current_user: Current authenticated user
+        service: Injected VacunaService
+        
+    Returns:
+        Vacuna data
+    """
+    try:
+        return service.get_vacuna(vacuna_id, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error getting vacuna {vacuna_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener vacuna"
+        )
 
 
 @router.put("/{vacuna_id}", response_model=Vacuna)
@@ -252,110 +251,65 @@ async def actualizar_vacuna(
     vacuna_id: str,
     vacuna_update: VacunaUpdate,
     current_user=Depends(require_roles("veterinario", "admin")),
-    db: Session = Depends(get_db),
+    service: VacunaService = Depends(get_vacuna_service),
 ):
-    """Actualizar un registro de vacuna.
-
-    No se permite cambiar la mascota asociada. Solo el veterinario asignado
-    (o admin) puede editar; si el editor es un veterinario, se firma con su
-    username.
     """
-    update_data = vacuna_update.model_dump(exclude_unset=True)
-    try:
-        vid = _validate_uuid(vacuna_id, "vacuna_id")
-        r = db.get(VacunaORM, vid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Vacuna no encontrada")
-
-        if "id_mascota" in update_data:
-            raise HTTPException(
-                status_code=400,
-                detail="No está permitido actualizar id_mascota mediante este endpoint",
-            )
-
-        if current_user.role == "veterinario":
-            if r.veterinario != current_user.username:
-                raise HTTPException(
-                    status_code=403, detail="No autorizado para modificar esta vacuna"
-                )
-
-        for field, value in update_data.items():
-            if isinstance(value, _PyEnum):
-                setattr(r, field, value.value)
-            else:
-                setattr(r, field, value)
-
-        if current_user.role == "veterinario":
-            r.veterinario = current_user.username
-
-        from database.db import set_audit_fields
-
-        set_audit_fields(r, current_user.id, creating=False)
-        db.add(r)
-        db.commit()
-        db.refresh(r)
-        m = db.get(MascotaORM, r.id_mascota)
-        owner = None
-        if m and m.propietario:
-            owner = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == m.propietario)
-                .one_or_none()
-            )
-        return {
-            "id_vacuna": r.id,
-            "id_mascota": r.id_mascota,
-            "mascota_nombre": m.nombre if m else None,
-            "propietario_username": (
-                owner.username if owner else (m.propietario if m else None)
-            ),
-            "propietario_nombre": owner.nombre if owner else None,
-            "propietario_telefono": owner.telefono if owner else None,
-            "tipo_vacuna": _normalize_stored_tipo_vacuna(r.tipo_vacuna),
-            "fecha_aplicacion": r.fecha_aplicacion,
-            "veterinario": r.veterinario,
-            "lote_vacuna": r.lote_vacuna,
-            "proxima_dosis": r.proxima_dosis,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=str(e))
+    Update a vacuna.
     
+    Only veterinarios or admins can update.
+    
+    Args:
+        vacuna_id: Vacuna ID
+        vacuna_update: Update data
+        current_user: Current authenticated user
+        service: Injected VacunaService
+        
+    Returns:
+        Updated vacuna
+    """
+    try:
+        return service.update_vacuna(vacuna_id, vacuna_update, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error updating vacuna {vacuna_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al actualizar vacuna"
+        )
 
 
 @router.delete("/{vacuna_id}")
 async def eliminar_vacuna(
-    vacuna_id: str, current_user=Depends(require_roles("veterinario", "admin")), db: Session = Depends(get_db)
+    vacuna_id: str,
+    current_user=Depends(require_roles("admin")),
+    service: VacunaService = Depends(get_vacuna_service),
 ):
-    """Eliminar un registro de vacuna.
-
-    Solo el veterinario asignado a la vacuna o un administrador pueden eliminar.
+    """
+    Delete a vacuna (soft delete).
+    
+    Only admins can delete vacunas.
+    
+    Args:
+        vacuna_id: Vacuna ID
+        current_user: Current authenticated user
+        service: Injected VacunaService
+        
+    Returns:
+        Delete confirmation
     """
     try:
-        vid = _validate_uuid(vacuna_id, "vacuna_id")
-        r = db.get(VacunaORM, vid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Vacuna no encontrada")
-        if (
-            current_user.role == "veterinario"
-            and r.veterinario != current_user.username
-        ):
-            raise HTTPException(
-                status_code=403, detail="No autorizado para eliminar esta vacuna"
-            )
-        db.delete(r)
-        db.commit()
-        return {"message": "Registro de vacuna eliminado exitosamente"}
-    except HTTPException:
-        raise
+        service.delete_vacuna(vacuna_id, current_user)
+        return create_delete_response(
+            message="Vacuna eliminada correctamente",
+            deleted_id=vacuna_id,
+            soft_delete=True
+        )
+    except AppException as e:
+        raise handle_service_exception(e)
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error deleting vacuna {vacuna_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al eliminar vacuna"
+        )

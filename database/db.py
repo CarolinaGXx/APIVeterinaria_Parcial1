@@ -1,23 +1,16 @@
-from typing import Optional
+"""módulo de base de datos con manejo mejorado de errores y configuración centralizada."""
+from typing import Optional, Generator
 from datetime import datetime
 from uuid import uuid4, UUID
-import os
-import urllib.parse
 import hashlib
+import logging
+import os
 
-try:
-    # use dynamic import so static analyzers don't require the package to be installed
-    import importlib
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import SQLAlchemyError
 
-    _dotenv = importlib.import_module("dotenv")
-    _DOTENV_AVAILABLE = True
-except Exception:
-    _DOTENV_AVAILABLE = False
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-# Import ORM classes and Base from models.py
+# import ORM classes and Base from models.py
 from .models import (
     Base,
     UsuarioORM,
@@ -29,39 +22,60 @@ from .models import (
     RecetaLineaORM,
 )
 
-# Load .env for local development if python-dotenv is installed
-if _DOTENV_AVAILABLE:
-    try:
-        _dotenv.load_dotenv()
-    except Exception:
-        pass
+#import configuration
+from config import settings
 
-# Engine / session
-# If DATABASE_URL env var is set, use it; otherwise fall back to previous SQL Server default
-params = urllib.parse.quote_plus(
-    "DRIVER={ODBC Driver 17 for SQL Server};SERVER=SANTIAGO\\SQLEXPRESS;DATABASE=APIVeterinaria;Trusted_Connection=yes;"
+logger = logging.getLogger(__name__)
+
+#engine / session con configuración centralizada
+engine = create_engine(
+    settings.database_url,
+    echo=settings.debug_mode,
+    future=True,
+    pool_pre_ping=True,  #verifica conexiones antes de usarlas
+    pool_recycle=3600,   #recicla conexiones cada hora
+    connect_args={
+        "timeout": 30,   #timeout de conexión en segundos
+        "connect_timeout": 30  #timeout adicional para pyodbc
+    }
 )
-DATABASE_URL = os.getenv("DATABASE_URL") or ("mssql+pyodbc:///?odbc_connect=" + params)
-
-engine = create_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
-def get_db():
-    """Dependencia de FastAPI que provee una sesión y la cierra al terminar."""
+def get_db() -> Generator[Session, None, None]:
+    """dependencia de FastAPI que provee una sesión con manejo robusto de errores.
+    
+    Yields:
+        Session: Sesión de SQLAlchemy
+        
+    Nota:
+        - Hace rollback automático si hay excepciones SQLAlchemy
+        - Cierra la sesión de forma segura
+        - No captura HTTPException (son errores esperados de negocio)
+    """
     db = SessionLocal()
     try:
         yield db
+    except SQLAlchemyError as e:
+        logger.error(f"Error de base de datos en sesión: {e}")
+        db.rollback()
+        raise
     finally:
-        try:
-            db.close()
-        except Exception:
-            pass
+        db.close()
 
 
-def create_tables():
-    """Crear tablas ORM en la base de datos SQL Server (o la DB configurada)."""
-    Base.metadata.create_all(bind=engine)
+def create_tables() -> None:
+    """Crear tablas ORM en la base de datos.
+    
+    Raises:
+        SQLAlchemyError: Si hay error al crear las tablas
+    """
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Tablas de base de datos creadas/verificadas exitosamente")
+    except SQLAlchemyError as e:
+        logger.error(f"Error al crear tablas: {e}", exc_info=True)
+        raise
 
 
 def generar_numero_factura_uuid(factura_uuid: str) -> str:
@@ -79,14 +93,31 @@ def uuid_to_str(value) -> Optional[str]:
 
 
 def get_database_url() -> str:
+    """Obtiene la URL de la base de datos (sin credenciales sensibles)."""
     try:
-        return str(engine.url)
-    except Exception:
-        return DATABASE_URL
+        url = str(engine.url)
+        #ocultar credenciales si existen
+        if '@' in url:
+            parts = url.split('@')
+            return f"***@{parts[1]}"
+        return url
+    except Exception as e:
+        logger.warning(f"Error al obtener URL de BD: {e}")
+        return "***"
 
 
 def ensure_usuario_exists(user_id: Optional[str]) -> bool:
-    """Verifica si un usuario existe en la tabla usuarios (no crea usuarios)."""
+    """Verifica si un usuario existe en la tabla usuarios
+    
+    Args:
+        user_id: ID del usuario a verificar
+        
+    Returns:
+        bool: True si el usuario existe, False en caso contrario
+        
+    Raises:
+        SQLAlchemyError: Si hay error de base de datos
+    """
     if not user_id:
         return False
     user_id_str = str(user_id)
@@ -95,7 +126,8 @@ def ensure_usuario_exists(user_id: Optional[str]) -> bool:
         db = SessionLocal()
         u = db.get(UsuarioORM, user_id_str)
         return u is not None
-    except Exception:
+    except SQLAlchemyError as e:
+        logger.error(f"Error al verificar usuario {user_id_str}: {e}")
         if db:
             try:
                 db.rollback()
@@ -104,7 +136,10 @@ def ensure_usuario_exists(user_id: Optional[str]) -> bool:
         raise
     finally:
         if db:
-            db.close()
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def hash_password(password: str) -> tuple[str, str]:
@@ -121,15 +156,16 @@ def verify_password(salt_hex: str, hash_hex: str, password: str) -> bool:
     return dk.hex() == hash_hex
 
 
-def set_audit_fields(obj, user_id: Optional[str], creating: bool = True):
-    """Helper para setear campos de auditoría en una instancia ORM.
+def set_audit_fields(obj, user_id: Optional[str], creating: bool = True) -> None:
+    """helper para setear campos de auditoría en una instancia ORM
 
-    - obj: instancia ORM
-    - user_id: id del usuario responsable (puede ser None)
-    - creating: si True setea id_usuario_creacion y fecha_creacion
-                si False setea id_usuario_actualizacion y fecha_actualizacion
+    Args:
+        obj: instancia ORM a modificar
+        user_id: ID del usuario responsable (puede ser None)
+        creating: Si True setea campos de creación, si False solo actualización
     """
-    now = datetime.utcnow()
+    from utils.datetime_utils import get_local_now
+    now = get_local_now().replace(tzinfo=None)
     try:
         if creating:
             if hasattr(obj, "id_usuario_creacion"):
@@ -143,6 +179,49 @@ def set_audit_fields(obj, user_id: Optional[str], creating: bool = True):
             obj.id_usuario_actualizacion = user_id
         if hasattr(obj, "fecha_actualizacion"):
             obj.fecha_actualizacion = now
-    except Exception:
-        # no fallar por auditoría
-        pass
+    except Exception as e:
+        # no fallar por auditoría, solo registrar
+        logger.warning(f"Error al setear campos de auditoría: {e}")
+
+
+def soft_delete(obj, user_id: Optional[str]) -> None:
+    """
+    marca un objeto como eliminado (soft delete)
+    
+    Args:
+        obj: instancia ORM a marcar como eliminada
+        user_id: ID del usuario que realiza la eliminación
+    """
+    from utils.datetime_utils import get_local_now
+    now = get_local_now().replace(tzinfo=None)
+    try:
+        if hasattr(obj, "is_deleted"):
+            obj.is_deleted = True
+        if hasattr(obj, "deleted_at"):
+            obj.deleted_at = now
+        if hasattr(obj, "deleted_by"):
+            obj.deleted_by = user_id
+        # También actualizar campos de auditoría
+        set_audit_fields(obj, user_id, creating=False)
+    except Exception as e:
+        logger.warning(f"Error al aplicar soft delete: {e}")
+
+
+def restore_deleted(obj, user_id: Optional[str]) -> None:
+    """restaura un objeto previamente eliminado con soft delete
+    
+    Args:
+        obj: instancia ORM a restaurar
+        user_id: ID del usuario que realiza la restauración
+    """
+    try:
+        if hasattr(obj, "is_deleted"):
+            obj.is_deleted = False
+        if hasattr(obj, "deleted_at"):
+            obj.deleted_at = None
+        if hasattr(obj, "deleted_by"):
+            obj.deleted_by = None
+        # Actualizar campos de auditoría
+        set_audit_fields(obj, user_id, creating=False)
+    except Exception as e:
+        logger.warning(f"Error al restaurar objeto: {e}")

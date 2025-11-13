@@ -1,4 +1,3 @@
-import os
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -10,19 +9,9 @@ from fastapi import Depends, HTTPException, status
 from database import UsuarioORM
 from database.db import get_db
 from sqlalchemy.orm import Session
+from config import settings
 
-logger = logging.getLogger("apiveterinaria.auth")
-logging.basicConfig(level=logging.INFO)
-
-SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_MINUTES", "30"))
-JWT_ISSUER = os.getenv("JWT_ISSUER", "APIVeterinaria")
-JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "APIVeterinariaClient")
-
-if not SECRET_KEY:
-    logger.error("JWT_SECRET_KEY no está definido. Configure la variable de entorno JWT_SECRET_KEY.")
-    raise RuntimeError("JWT_SECRET_KEY must be set in environment")
+logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
@@ -33,12 +22,17 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """
     to_encode = data.copy()
     now = datetime.utcnow()
-    expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    expire = now + (expires_delta or timedelta(minutes=settings.jwt_access_minutes))
     # Ensure standard claims
     if "sub" not in to_encode:
         raise ValueError("`data` must include `sub` (subject / user id)")
-    to_encode.update({"exp": expire, "iat": now, "iss": JWT_ISSUER, "aud": JWT_AUDIENCE})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    to_encode.update({
+        "exp": expire,
+        "iat": now,
+        "iss": settings.jwt_issuer,
+        "aud": settings.jwt_audience
+    })
+    return jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def decode_token(token: str) -> dict:
@@ -50,17 +44,17 @@ def decode_token(token: str) -> dict:
     try:
         payload = jwt.decode(
             token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM],
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE,
+            settings.jwt_secret_key,
+            algorithms=[settings.jwt_algorithm],
+            issuer=settings.jwt_issuer,
+            audience=settings.jwt_audience,
         )
         return payload
     except ExpiredSignatureError:
         logger.info("Token expirado")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expirado")
     except JWTError as e:
-        logger.info("Token inválido o claim mismatch: %s", e)
+        logger.info(f"Token inválido o claim mismatch: {e}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
 
 

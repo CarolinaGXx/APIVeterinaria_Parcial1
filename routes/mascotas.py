@@ -1,247 +1,256 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
-from typing import List, Optional
-from uuid import UUID as UUID_type, UUID
-from datetime import datetime
-from enum import Enum as _PyEnum
+"""
+Mascota routes (Controllers) - Layered Architecture.
 
-from models import Mascota, MascotaCreate, MascotaUpdate, TipoMascota
-from database import (
-    CitaORM,
-    VacunaORM,
-    MascotaORM,
-    UsuarioORM,
-    uuid_to_str,
-    get_database_url,
-    ensure_usuario_exists,
+This module handles HTTP requests/responses for mascota endpoints.
+All business logic is delegated to the MascotaService layer.
+
+Responsibilities:
+- Parse HTTP requests
+- Validate authentication/authorization
+- Delegate to service layer
+- Format HTTP responses
+- Handle errors and status codes
+"""
+
+from fastapi import APIRouter, HTTPException, Query, Depends, status
+from typing import Optional
+from datetime import datetime
+import logging
+
+from models.mascotas import Mascota, MascotaCreate, MascotaUpdate, TipoMascota
+from models.common import create_delete_response
+from core.pagination import create_paginated_response
+from core.exceptions import (
+    AppException,
+    NotFoundException,
+    ForbiddenException,
+    BusinessException,
+    ValidationException,
 )
+from services.mascota_service import MascotaService
 from database.db import get_db
 from sqlalchemy.orm import Session
 from auth import get_current_user_dep, require_roles
+from config import settings
 
-"""
-Rutas relacionadas con mascotas.
-
-Endpoints:
-- crear_mascota: crear una mascota; el propietario se infiere del usuario autenticado.
-- obtener_mascotas: listar mascotas, filtra por tipo y (para admin) por propietario.
-- obtener_mascota: obtener una mascota por id (solo propietario o admin).
-- actualizar_mascota: actualizar campos permitidos de la mascota (propietario no editable).
-- eliminar_mascota: eliminar mascota si no tiene relaciones (citas/vacunas).
-
-Nota: las operaciones registran campos de auditoría usando las utilidades en database.db.
-Vacunas y citas se atienden desde sus routers específicos (no aquí).
-"""
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mascotas", tags=["mascotas"])
 
 
-def _enum_to_value(v):
-    """Devuelve Enum.value si v es una enumeración; de lo contrario,
-        devuelve v sin cambios.
+# ==================== Dependency Injection ====================
 
-    Este asistente se utiliza para almacenar valores
-    de enumeración en campos de la base de datos cuando los
-    modelos de Pydantic pueden proporcionar miembros de enumeración.
-    """
-    if isinstance(v, _PyEnum):
-        return v.value
-    return v
+def get_mascota_service(db: Session = Depends(get_db)) -> MascotaService:
+    """Inject MascotaService with its dependencies."""
+    from repositories.mascota_repository import MascotaRepository
+    from repositories.usuario_repository import UsuarioRepository
+    repository = MascotaRepository(db)
+    usuario_repository = UsuarioRepository(db)
+    return MascotaService(repository, usuario_repository)
 
 
-def _normalize_stored_tipo(s: str):
-    """Normaliza las cadenas tipo almacenadas provenientes
-        de la base de datos.
+# ==================== Exception Handler ====================
 
-    La base de datos puede almacenar valores de enumeración
-    como nombres completos (p. ej., "TipoMascota.perro").
-    Este asistente devuelve el nombre corto después del punto
-    («perro») o la entrada sin cambios/sin cambios cuando corresponda.
-    """
-    if s is None:
-        return s
-    if isinstance(s, str) and "." in s:
-        return s.split(".", 1)[1]
-    return s
-
-
-def _validate_uuid(id_str: str, name: str) -> str:
-    """Valida que id_str sea una cadena UUID y la devuelve.
-
-    Acepta objetos UUID o representaciones de cadena.
-    Genera HTTPException(400) si el valor no es un UUID válido.
-    """
-    try:
-        UUID_type(str(id_str))
-        return str(id_str)
-    except Exception:
-        raise HTTPException(
-            status_code=400, detail=f"{name} inválido: debe ser un UUID"
+def handle_service_exception(e: Exception) -> HTTPException:
+    """Convert service layer exceptions to HTTP exceptions."""
+    if isinstance(e, NotFoundException):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=e.message
+        )
+    elif isinstance(e, ForbiddenException):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=e.message
+        )
+    elif isinstance(e, ValidationException):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=e.message
+        )
+    elif isinstance(e, BusinessException):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=e.message
+        )
+    elif isinstance(e, AppException):
+        return HTTPException(
+            status_code=e.status_code,
+            detail=e.message
+        )
+    else:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        return HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
         )
 
 
-def _get_telefono_for_username(db_session, username: Optional[str]) -> Optional[str]:
-    """Devuelve el teléfono de un nombre de usuario o
-        "Ninguno" en caso de error o usuario faltante.
+# ==================== Endpoints ====================
 
-    Esta es una herramienta de máxima eficiencia que utilizan varios
-    endpoints para incluir el teléfono del propietario en las
-    respuestas sin generar errores cuando falta el registro del usuario.
-    """
-    if not username:
-        return None
-    try:
-        u = (
-            db_session.query(UsuarioORM)
-            .filter(UsuarioORM.username == username)
-            .one_or_none()
-        )
-        return u.telefono if u else None
-    except Exception:
-        return None
-
-
-@router.post("/", response_model=Mascota, status_code=201)
+@router.post("/", response_model=Mascota, status_code=status.HTTP_201_CREATED)
 async def crear_mascota(
     mascota: MascotaCreate,
     current_user=Depends(require_roles("veterinario", "cliente", "admin")),
-    db: Session = Depends(get_db),
+    service: MascotaService = Depends(get_mascota_service),
 ):
-    """Crear una nueva mascota.
-
-    El propietario se infiere del usuario autenticado. Los campos de auditoría
-    se establecen usando el id del usuario autenticado. Devuelve la mascota
-    creada junto con el teléfono del propietario cuando esté disponible.
     """
-    data = mascota.model_dump()
-    propietario_username = current_user.username
-    telefono_prop = current_user.telefono if hasattr(current_user, "telefono") else None
-
+    Create a new mascota.
+    
+    The owner is inferred from the authenticated user.
+    
+    Args:
+        mascota: Mascota data
+        current_user: Current authenticated user
+        service: Injected MascotaService
+        
+    Returns:
+        Created mascota with owner phone number
+    """
     try:
-        db_obj = MascotaORM(
-            nombre=data["nombre"],
-            tipo=_enum_to_value(data["tipo"]),
-            raza=data.get("raza"),
-            edad=data.get("edad"),
-            peso=data.get("peso"),
-            propietario=propietario_username,
-        )
-        from database.db import set_audit_fields
-
-        set_audit_fields(db_obj, current_user.id, creating=True)
-        db.add(db_obj)
-        db.commit()
-        db.refresh(db_obj)
-        return {
-            "id_mascota": db_obj.id,
-            "nombre": db_obj.nombre,
-            "tipo": _normalize_stored_tipo(db_obj.tipo),
-            "raza": db_obj.raza,
-            "edad": db_obj.edad,
-            "peso": db_obj.peso,
-            "propietario": db_obj.propietario,
-            "telefono_propietario": telefono_prop,
-        }
-    except HTTPException:
-        raise
+        return service.create_mascota(mascota, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Error al crear mascota: {e}")
+        logger.error(f"Error creating mascota: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al crear mascota"
+        )
 
 
-@router.get("/", response_model=List[Mascota])
+@router.get("/search")
+async def buscar_mascotas(
+    q: str = Query(..., min_length=1, description="Término de búsqueda (nombre de mascota o propietario)"),
+    limit: int = Query(20, ge=1, le=50, description="Máximo de resultados"),
+    include_deleted: bool = Query(False, description="Incluir mascotas eliminadas"),
+    current_user=Depends(get_current_user_dep),
+    service: MascotaService = Depends(get_mascota_service),
+):
+    """
+    Search mascotas by name or owner (for autocomplete/quick search).
+    
+    Returns a simplified list of mascotas matching the search term.
+    Designed for real-time search while creating vaccines/appointments.
+    
+    Args:
+        q: Search term (searches in mascota name and owner name)
+        limit: Maximum results to return (default 20, max 50)
+        include_deleted: Include soft-deleted mascotas
+        current_user: Current authenticated user
+        service: Injected MascotaService
+        
+    Returns:
+        List of mascotas (not paginated, simple array)
+    """
+    try:
+        items, _ = service.get_mascotas(
+            current_user=current_user,
+            page=0,
+            page_size=limit,
+            tipo=None,
+            propietario=None,
+            search_term=q,  # New parameter for search
+            include_deleted=include_deleted
+        )
+        return items
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error searching mascotas: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al buscar mascotas"
+        )
+
+
+@router.get("/")
 async def obtener_mascotas(
+    page: int = Query(0, ge=0, description="Número de página (0-indexed)"),
+    page_size: int = Query(
+        settings.default_page_size,
+        ge=1,
+        le=settings.max_page_size,
+        description="Tamaño de página"
+    ),
     tipo: Optional[TipoMascota] = Query(
         None, description="Filtrar por tipo de mascota"
     ),
     propietario: Optional[str] = Query(
         None, description="Filtrar por propietario (admin only)"
     ),
+    include_deleted: bool = Query(False, description="Incluir mascotas eliminadas"),
     current_user=Depends(get_current_user_dep),
-    db: Session = Depends(get_db),
+    service: MascotaService = Depends(get_mascota_service),
 ):
-    """Obtener lista de mascotas.
-
-    Por defecto devuelve las mascotas pertenecientes al usuario autenticado.
-    Los administradores pueden filtrar opcionalmente por propietario
-    (coincidencia parcial).
     """
-    q = db.query(MascotaORM)
-    if tipo:
-        q = q.filter(MascotaORM.tipo == _enum_to_value(tipo))
-
-    if current_user.role == "admin":
-        if propietario:
-            q = q.filter(MascotaORM.propietario.ilike(f"%{propietario}%"))
-    else:
-        q = q.filter(MascotaORM.propietario == current_user.username)
-
-    results = q.all()
-    resp = []
-    for r in results:
-        telefono = _get_telefono_for_username(db, r.propietario)
-        resp.append(
-            {
-                "id_mascota": r.id,
-                "nombre": r.nombre,
-                "tipo": _normalize_stored_tipo(r.tipo),
-                "raza": r.raza,
-                "edad": r.edad,
-                "peso": r.peso,
-                "propietario": r.propietario,
-                "telefono_propietario": telefono,
-            }
+    Get list of mascotas with pagination.
+    
+    By default returns mascotas belonging to the authenticated user.
+    Administrators can optionally filter by owner.
+    
+    Args:
+        page: Page number (0-indexed)
+        page_size: Items per page
+        tipo: Filter by mascota type
+        propietario: Filter by owner username (admin only)
+        include_deleted: Include soft-deleted mascotas
+        current_user: Current authenticated user
+        service: Injected MascotaService
+        
+    Returns:
+        Paginated list of mascotas
+    """
+    try:
+        tipo_str = tipo.value if tipo else None
+        items, total = service.get_mascotas(
+            current_user=current_user,
+            page=page,
+            page_size=page_size,
+            tipo=tipo_str,
+            propietario=propietario,
+            include_deleted=include_deleted
         )
-    return resp
+        return create_paginated_response(items, page, page_size, total)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error getting mascotas: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener mascotas"
+        )
 
 
 @router.get("/{mascota_id}", response_model=Mascota)
 async def obtener_mascota(
     mascota_id: str,
     current_user=Depends(get_current_user_dep),
-    db: Session = Depends(get_db),
+    service: MascotaService = Depends(get_mascota_service),
 ):
-    """Obtener una mascota por id.
-
-    Solo el propietario o un administrador pueden ver la mascota. La respuesta
-    incluye el telefono_propietario cuando esté disponible. La ausencia del
-    registro de usuario se tolera (telefono será None).
+    """
+    Get a mascota by ID.
+    
+    Only the owner or an administrator can view the mascota.
+    
+    Args:
+        mascota_id: Mascota ID
+        current_user: Current authenticated user
+        service: Injected MascotaService
+        
+    Returns:
+        Mascota with owner phone number
     """
     try:
-        mid = _validate_uuid(mascota_id, "mascota_id")
-        r = db.get(MascotaORM, mid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Mascota no encontrada")
-
-        if current_user.role != "admin" and r.propietario != current_user.username:
-            raise HTTPException(
-                status_code=403, detail="No autorizado para ver esta mascota"
-            )
-
-        telefono = None
-        try:
-            usuario = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == r.propietario)
-                .one_or_none()
-            )
-            telefono = usuario.telefono if usuario else None
-        except Exception:
-            telefono = None
-        return {
-            "id_mascota": r.id,
-            "nombre": r.nombre,
-            "tipo": _normalize_stored_tipo(r.tipo),
-            "raza": r.raza,
-            "edad": r.edad,
-            "peso": r.peso,
-            "propietario": r.propietario,
-            "telefono_propietario": telefono,
-        }
-    finally:
-        pass
+        return service.get_mascota(mascota_id, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error getting mascota {mascota_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener mascota"
+        )
 
 
 @router.put("/{mascota_id}", response_model=Mascota)
@@ -249,115 +258,103 @@ async def actualizar_mascota(
     mascota_id: str,
     mascota_update: MascotaUpdate,
     current_user=Depends(get_current_user_dep),
-    db: Session = Depends(get_db),
+    service: MascotaService = Depends(get_mascota_service),
 ):
-    """Actualizar una mascota existente.
-
-    Solo el propietario o un administrador pueden actualizar. El campo
-    propietario no es editable mediante este endpoint y provocará un 400 si
-    se proporciona. Los valores Enum se almacenan usando su .value. Los campos
-    de auditoría se actualizan usando el id del usuario autenticado.
     """
-    data = mascota_update.model_dump(exclude_unset=True)
+    Update an existing mascota.
+    
+    Only the owner or an administrator can update.
+    
+    Args:
+        mascota_id: Mascota ID
+        mascota_update: Update data
+        current_user: Current authenticated user
+        service: Injected MascotaService
+        
+    Returns:
+        Updated mascota
+    """
     try:
-        mid = _validate_uuid(mascota_id, "mascota_id")
-        r = db.get(MascotaORM, mid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Mascota no encontrada")
-
-        if current_user.role != "admin" and r.propietario != current_user.username:
-            raise HTTPException(
-                status_code=403, detail="No autorizado para modificar esta mascota"
-            )
-
-        if "propietario" in data:
-            raise HTTPException(
-                status_code=400,
-                detail="No está permitido actualizar el propietario mediante este endpoint; se infiere del usuario autenticado",
-            )
-
-        for field, value in data.items():
-            if isinstance(value, _PyEnum):
-                setattr(r, field, value.value)
-            else:
-                setattr(r, field, value)
-
-        from database.db import set_audit_fields
-
-        set_audit_fields(r, current_user.id, creating=False)
-        db.add(r)
-        db.commit()
-        db.refresh(r)
-        telefono = None
-        try:
-            usuario = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == r.propietario)
-                .one_or_none()
-            )
-            telefono = usuario.telefono if usuario else None
-        except Exception:
-            telefono = None
-        return {
-            "id_mascota": r.id,
-            "nombre": r.nombre,
-            "tipo": _normalize_stored_tipo(r.tipo),
-            "raza": r.raza,
-            "edad": r.edad,
-            "peso": r.peso,
-            "propietario": r.propietario,
-            "telefono_propietario": telefono,
-        }
-    except HTTPException:
-        raise
+        return service.update_mascota(mascota_id, mascota_update, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Error al actualizar mascota: {e}")
+        logger.error(f"Error updating mascota {mascota_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al actualizar mascota"
+        )
 
 
 @router.delete("/{mascota_id}")
 async def eliminar_mascota(
     mascota_id: str,
     current_user=Depends(get_current_user_dep),
-    db: Session = Depends(get_db),
+    service: MascotaService = Depends(get_mascota_service),
 ):
-    """Eliminar una mascota si no existen citas o vacunas relacionadas.
-
-    Solo el propietario o un administrador pueden eliminar. El endpoint
-    comprueba si existen registros relacionados en Cita y Vacuna y devuelve
-    400 si existen para evitar la pérdida accidental de datos.
+    """
+    Delete a mascota (soft delete).
+    
+    The mascota is marked as deleted but not removed from the database.
+    Only the owner or an administrator can delete.
+    
+    Args:
+        mascota_id: Mascota ID
+        current_user: Current authenticated user
+        service: Injected MascotaService
+        
+    Returns:
+        Delete confirmation
     """
     try:
-        mid = _validate_uuid(mascota_id, "mascota_id")
-        r = db.get(MascotaORM, mid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Mascota no encontrada")
-
-        if current_user.role != "admin" and r.propietario != current_user.username:
-            raise HTTPException(
-                status_code=403, detail="No autorizado para eliminar esta mascota"
-            )
-
-        citas_asociadas = db.query(CitaORM).filter(CitaORM.id_mascota == mid).first()
-        vacunas_asociadas = (
-            db.query(VacunaORM).filter(VacunaORM.id_mascota == mid).first()
+        service.delete_mascota(mascota_id, current_user)
+        return create_delete_response(
+            message="Mascota eliminada correctamente",
+            deleted_id=mascota_id,
+            soft_delete=True
         )
-        if citas_asociadas or vacunas_asociadas:
-            raise HTTPException(
-                status_code=400,
-                detail="No se puede eliminar la mascota porque tiene citas o vacunas asociadas",
-            )
-        db.delete(r)
-        db.commit()
-        return {"message": "Mascota eliminada exitosamente"}
-    except HTTPException:
-        raise
+    except AppException as e:
+        raise handle_service_exception(e)
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Error al eliminar mascota: {e}")
+        logger.error(f"Error deleting mascota {mascota_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al eliminar mascota"
+        )
+
+
+@router.post("/{mascota_id}/restore")
+async def restaurar_mascota(
+    mascota_id: str,
+    current_user=Depends(get_current_user_dep),
+    service: MascotaService = Depends(get_mascota_service),
+):
+    """
+    Restore a soft-deleted mascota.
+    
+    Only the owner or an administrator can restore.
+    
+    Args:
+        mascota_id: Mascota ID
+        current_user: Current authenticated user
+        service: Injected MascotaService
+        
+    Returns:
+        Restore confirmation
+    """
+    try:
+        service.restore_mascota(mascota_id, current_user)
+        return {
+            "success": True,
+            "message": "Mascota restaurada correctamente",
+            "id_mascota": mascota_id,
+            "timestamp": datetime.utcnow()
+        }
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error restoring mascota {mascota_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al restaurar mascota"
+        )
