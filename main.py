@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import os
+from contextlib import asynccontextmanager
 import uvicorn
 import logging
+
+from config import settings, configure_logging
 
 from routes import (
     mascotas_router,
@@ -12,74 +14,91 @@ from routes import (
     usuarios_router,
     recetas_router,
 )
-
-from routes.facturas import mascotas_facturas_router
-
+from routes.estadisticas import router as estadisticas_router
+from routes.mascota_historial import router as mascota_historial_router
 from database.db import create_tables
 
-app = FastAPI(
-    title="API Veterinaria",
-    description="Sistema de gestión veterinaria para mascotas",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+logger = logging.getLogger(__name__)
 
-_allowed = os.getenv("CORS_ALLOWED_ORIGINS")
-if _allowed:
-    ALLOWED_ORIGINS = [o.strip() for o in _allowed.split(",") if o.strip()]
-else:
-    ALLOWED_ORIGINS = [
-        "http://localhost",
-        "http://localhost:3000",
-        "http://localhost:8000",
-    ]
+# Configurar logging una sola vez al inicio
+configure_logging()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Maneja el ciclo de vida de la aplicación."""
+    # Startup
     try:
         create_tables()
     except Exception as e:
-        logger = logging.getLogger("apiveterinaria.startup")
-        logging.basicConfig(level=logging.INFO)
-        logger.warning("No se pudieron crear tablas en la base de datos: %s", e)
+        logger.warning(f"No se pudieron crear tablas en la base de datos: {e}")
+    yield
+    # Shutdown
+
+app = FastAPI(
+    title=settings.app_name,
+    description="Sistema de gestión veterinaria para mascotas. API optimizada para frontend Blazor.",
+    version=settings.app_version,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+    debug=settings.debug_mode
+)
+
+# Configurar CORS para permitir frontend Blazor
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 @app.get("/")
 async def root():
+    """Endpoint raíz con información de la API."""
     return {
-        "message": "API Veterinaria - Sistema de Gestión de Mascotas",
-        "version": "1.0.0",
+        "message": f"{settings.app_name} - Sistema de Gestión de Mascotas",
+        "version": settings.app_version,
         "status": "active",
+        "environment": "production" if settings.is_production else "development",
         "docs": "/docs",
         "redoc": "/redoc"
     }
 
 app.include_router(mascotas_router)
+app.include_router(mascota_historial_router)  # Historial clínico completo
 app.include_router(citas_router)
 app.include_router(vacunas_router)
 app.include_router(facturas_router)
 app.include_router(usuarios_router)
 app.include_router(recetas_router)
+app.include_router(estadisticas_router)
 
 from routes.auth import router as auth_router
 app.include_router(auth_router)
 
-app.include_router(mascotas_facturas_router)
-
 @app.get("/health")
 async def health_check():
+    """Health check endpoint con verificación de base de datos."""
+    from database.db import engine
+    from sqlalchemy import text
+    
+    db_status = "unknown"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_status = "connected"
+    except Exception as e:
+        logger.error(f"Health check: Error de conexión a BD: {e}")
+        db_status = "disconnected"
+    
     return {
-        "status": "healthy",
-        "service": "APIVeterinaria_Parcial1",
-        "version": "1.0.0"
+        "status": "healthy" if db_status == "connected" else "unhealthy",
+        "service": settings.app_name,
+        "version": settings.app_version,
+        "database": db_status,
+        "environment": "production" if settings.is_production else "development"
     }
 
 if __name__ == "__main__":
