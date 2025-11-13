@@ -13,7 +13,6 @@ class TipoVacuna(str, Enum):
     triple_felina = "triple_felina"
     newcastle = "newcastle"
 
-
 class VacunaBase(BaseModel):
     id_mascota: UUID
     tipo_vacuna: TipoVacuna
@@ -21,10 +20,12 @@ class VacunaBase(BaseModel):
     lote_vacuna: str = Field(..., min_length=1, max_length=20)
     proxima_dosis: Optional[date] = None
 
-
-class VacunaCreate(VacunaBase):
-    pass
-
+class VacunaCreate(BaseModel):
+    """Modelo para crear vacuna. fecha_aplicacion se genera automáticamente con la fecha actual."""
+    id_mascota: UUID
+    tipo_vacuna: TipoVacuna
+    lote_vacuna: str = Field(..., min_length=1, max_length=20)
+    proxima_dosis: Optional[date] = None
 
 class VacunaUpdate(BaseModel):
     tipo_vacuna: Optional[TipoVacuna] = None
@@ -32,9 +33,11 @@ class VacunaUpdate(BaseModel):
     lote_vacuna: Optional[str] = Field(None, min_length=1, max_length=20)
     proxima_dosis: Optional[date] = None
 
-
 class Vacuna(VacunaBase):
     id_vacuna: UUID
+    veterinario: str
+    veterinario_nombre: Optional[str] = None
+    veterinario_telefono: Optional[str] = None
     mascota_nombre: str
     propietario_username: Optional[str] = None
     propietario_nombre: Optional[str] = None
