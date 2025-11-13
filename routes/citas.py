@@ -1,410 +1,274 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
-from typing import List, Optional
-from datetime import datetime
-from uuid import UUID
-from enum import Enum as _PyEnum
+"""
+Cita routes (Controllers) - Layered Architecture.
 
-from models import Cita, CitaCreate, CitaUpdate, EstadoCita
-from database import CitaORM, MascotaORM, UsuarioORM, uuid_to_str
+This module handles HTTP requests/responses for cita endpoints.
+All business logic is delegated to the CitaService layer.
+"""
+
+from fastapi import APIRouter, HTTPException, Depends, Query, status
+from typing import Optional
+from datetime import datetime
+import logging
+
+from models.citas import Cita, CitaCreate, CitaUpdate, EstadoCita
+from models.common import create_delete_response
+from core.pagination import create_paginated_response
+from core.exceptions import (
+    AppException,
+    NotFoundException,
+    ForbiddenException,
+    BusinessException,
+    ValidationException,
+)
+from services.cita_service import CitaService
 from database.db import get_db
 from sqlalchemy.orm import Session
 from auth import get_current_user_dep, require_roles
+from config import settings
 
-"""
-Rutas para gestión de citas.
-
-Proporciona endpoints para agendar, listar, obtener, actualizar y cancelar citas.
-Los permisos están basados en roles y en la relación propietario-mascota.
-"""
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/citas", tags=["citas"])
 
 
-def _enum_to_value(v):
-    if isinstance(v, _PyEnum):
-        return v.value
-    return v
+# ==================== Dependency Injection ====================
+
+def get_cita_service(db: Session = Depends(get_db)) -> CitaService:
+    """Inject CitaService with its dependencies."""
+    from repositories.cita_repository import CitaRepository
+    from repositories.mascota_repository import MascotaRepository
+    from repositories.usuario_repository import UsuarioRepository
+    
+    cita_repo = CitaRepository(db)
+    mascota_repo = MascotaRepository(db)
+    usuario_repo = UsuarioRepository(db)
+    
+    return CitaService(cita_repo, mascota_repo, usuario_repo)
 
 
-def _normalize_stored_estado(s: str):
-    """Normaliza el campo estado retornado desde BD.
+# ==================== Exception Handler ====================
 
-    Convierte por ejemplo 'EstadoCita.pendiente' -> 'pendiente' si procede.
-    """
-    if s is None:
-        return s
-    if isinstance(s, str) and "." in s:
-        return s.split(".", 1)[1]
-    return s
-
-
-def _validate_uuid(id_str: str, name: str) -> str:
-    """Validar que id_str sea un UUID válido y devolverlo como string.
-
-    Lanza HTTPException(400) si no es un UUID válido.
-    """
-    try:
-        UUID(str(id_str))
-        return str(id_str)
-    except Exception:
-        raise HTTPException(
-            status_code=400, detail=f"{name} inválido: debe ser un UUID"
+def handle_service_exception(e: Exception) -> HTTPException:
+    """Convert service layer exceptions to HTTP exceptions."""
+    if isinstance(e, NotFoundException):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=e.message
         )
-
-
-@router.post("/", response_model=Cita, status_code=201)
-async def agendar_cita(
-    cita: CitaCreate,
-    db: Session = Depends(get_db),
-    current_user=Depends(require_roles("veterinario", "cliente", "admin")),
-):
-    """Agendar una nueva cita.
-
-    El propietario se infiere del usuario autenticado. Solo el propietario de
-    la mascota o un administrador pueden crear citas para esa mascota. Si se
-    especifica un veterinario, debe existir y tener role 'veterinario'.
-    """
-    data = cita.model_dump()
-    try:
-        mascota = db.get(MascotaORM, uuid_to_str(data["id_mascota"]))
-        if not mascota:
-            raise HTTPException(
-                status_code=400, detail="La mascota especificada no existe"
-            )
-
-        if (
-            current_user.role != "admin"
-            and mascota.propietario != current_user.username
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="No autorizado para crear una cita para esta mascota",
-            )
-
-        vet = (
-            db.query(UsuarioORM)
-            .filter(
-                UsuarioORM.username == data["veterinario"],
-                UsuarioORM.role == "veterinario",
-            )
-            .one_or_none()
+    elif isinstance(e, ForbiddenException):
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=e.message
         )
-        if not vet:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Veterinario '{data['veterinario']}' no encontrado o no es veterinario",
-            )
-
-        db_obj = CitaORM(
-            id_mascota=uuid_to_str(data["id_mascota"]),
-            fecha=data["fecha"],
-            motivo=data["motivo"],
-            veterinario=data["veterinario"],
-            estado=_enum_to_value(EstadoCita.pendiente),
+    elif isinstance(e, ValidationException):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=e.message
         )
-        from database.db import set_audit_fields
-
-        set_audit_fields(db_obj, current_user.id, creating=True)
-        db.add(db_obj)
-        db.commit()
-        db.refresh(db_obj)
-        owner = None
-        if mascota and mascota.propietario:
-            owner = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == mascota.propietario)
-                .one_or_none()
-            )
-        return {
-            "id_cita": db_obj.id,
-            "id_mascota": db_obj.id_mascota,
-            "mascota_nombre": mascota.nombre,
-            "propietario_username": (
-                owner.username if owner else (mascota.propietario if mascota else None)
-            ),
-            "propietario_nombre": owner.nombre if owner else None,
-            "propietario_telefono": owner.telefono if owner else None,
-            "fecha": db_obj.fecha,
-            "motivo": db_obj.motivo,
-            "veterinario": db_obj.veterinario,
-            "estado": _normalize_stored_estado(db_obj.estado),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Error al crear cita: {e}")
-
-
-@router.get("/", response_model=List[Cita])
-async def obtener_citas(
-    estado: Optional[EstadoCita] = Query(
-        None, description="Filtrar por estado de cita"
-    ),
-    veterinario: Optional[str] = Query(None, description="Filtrar por veterinario"),
-    current_user=Depends(get_current_user_dep),
-    db: Session = Depends(get_db),
-):
-    """Listar citas según filtros y permisos del usuario.
-
-    Reglas de visibilidad:
-    - admin: ve todas las citas
-    - veterinario: ve citas asignadas a él o citas de mascotas que posee
-    - cliente: ve solo citas de sus mascotas
-    """
-    q = db.query(CitaORM)
-    if estado:
-        q = q.filter(CitaORM.estado == _enum_to_value(estado))
-    if veterinario:
-        q = q.filter(CitaORM.veterinario.ilike(f"%{veterinario}%"))
-
-    if current_user.role == "admin":
-        pass
-    elif current_user.role == "veterinario":
-        from sqlalchemy import or_
-
-        q = q.join(MascotaORM, CitaORM.id_mascota == MascotaORM.id).filter(
-            or_(
-                CitaORM.veterinario == current_user.username,
-                MascotaORM.propietario == current_user.username,
-            )
+    elif isinstance(e, BusinessException):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=e.message
+        )
+    elif isinstance(e, AppException):
+        return HTTPException(
+            status_code=e.status_code,
+            detail=e.message
         )
     else:
-        q = q.join(MascotaORM, CitaORM.id_mascota == MascotaORM.id).filter(
-            MascotaORM.propietario == current_user.username
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        return HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
         )
 
-    results = q.all()
-    mascota_ids = list({r.id_mascota for r in results})
-    nombres = {}
-    mascotas_map = {}
-    owners_map = {}
-    if mascota_ids:
-        mascotas = db.query(MascotaORM).filter(MascotaORM.id.in_(mascota_ids)).all()
-        mascotas_map = {m.id: m for m in mascotas}
-        nombres = {m.id: m.nombre for m in mascotas}
-        owner_usernames = list({m.propietario for m in mascotas if m.propietario})
-        if owner_usernames:
-            users = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username.in_(owner_usernames))
-                .all()
-            )
-            owners_map = {u.username: u for u in users}
 
-    return [
-        {
-            "id_cita": r.id,
-            "id_mascota": r.id_mascota,
-            "mascota_nombre": (
-                mascotas_map.get(r.id_mascota).nombre
-                if mascotas_map.get(r.id_mascota)
-                else nombres.get(r.id_mascota)
-            ),
-            "propietario_username": (
-                owners_map.get(mascotas_map.get(r.id_mascota).propietario).username
-                if mascotas_map.get(r.id_mascota)
-                and owners_map.get(mascotas_map.get(r.id_mascota).propietario)
-                else (
-                    mascotas_map.get(r.id_mascota).propietario
-                    if mascotas_map.get(r.id_mascota)
-                    else None
-                )
-            ),
-            "propietario_nombre": (
-                owners_map.get(mascotas_map.get(r.id_mascota).propietario).nombre
-                if mascotas_map.get(r.id_mascota)
-                and owners_map.get(mascotas_map.get(r.id_mascota).propietario)
-                else None
-            ),
-            "propietario_telefono": (
-                owners_map.get(mascotas_map.get(r.id_mascota).propietario).telefono
-                if mascotas_map.get(r.id_mascota)
-                and owners_map.get(mascotas_map.get(r.id_mascota).propietario)
-                else None
-            ),
-            "fecha": r.fecha,
-            "motivo": r.motivo,
-            "veterinario": r.veterinario,
-            "estado": _normalize_stored_estado(r.estado),
-        }
-        for r in results
-    ]
+# ==================== Endpoints ====================
+
+@router.post("/", response_model=Cita, status_code=status.HTTP_201_CREATED)
+async def agendar_cita(
+    cita: CitaCreate,
+    current_user=Depends(require_roles("veterinario", "cliente", "admin")),
+    service: CitaService = Depends(get_cita_service),
+):
+    """
+    Schedule a new cita (appointment).
     
+    Only the pet owner or admin can create appointments for a pet.
+    Veterinario must exist and have the 'veterinario' role.
+    
+    Args:
+        cita: Cita creation data
+        current_user: Current authenticated user
+        service: Injected CitaService
+        
+    Returns:
+        Created cita
+    """
+    try:
+        return service.create_cita(cita, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error creating cita: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al crear cita"
+        )
+
+
+@router.get("/")
+async def obtener_citas(
+    page: int = Query(0, ge=0, description="Número de página (0-indexed)"),
+    page_size: int = Query(
+        settings.default_page_size,
+        ge=1,
+        le=settings.max_page_size,
+        description="Tamaño de página"
+    ),
+    estado: Optional[EstadoCita] = Query(None, description="Filtrar por estado"),
+    veterinario: Optional[str] = Query(None, description="Filtrar por veterinario"),
+    include_deleted: bool = Query(False, description="Incluir citas eliminadas"),
+    current_user=Depends(get_current_user_dep),
+    service: CitaService = Depends(get_cita_service),
+):
+    """
+    List citas with pagination and filters.
+    
+    Visibility rules:
+    - admin: sees all citas
+    - veterinario: sees citas assigned to them or for their own pets
+    - cliente: sees only citas for their own pets
+    
+    Args:
+        page: Page number (0-indexed)
+        page_size: Items per page
+        estado: Optional estado filter
+        veterinario: Optional veterinario filter
+        include_deleted: Include soft-deleted citas
+        current_user: Current authenticated user
+        service: Injected CitaService
+        
+    Returns:
+        Paginated list of citas
+    """
+    try:
+        estado_str = estado.value if estado else None
+        items, total = service.get_citas(
+            current_user=current_user,
+            page=page,
+            page_size=page_size,
+            estado=estado_str,
+            veterinario=veterinario,
+            include_deleted=include_deleted
+        )
+        return create_paginated_response(items, page, page_size, total)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error listing citas: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al listar citas"
+        )
 
 
 @router.get("/{cita_id}", response_model=Cita)
-async def obtener_cita(cita_id: str, current_user=Depends(get_current_user_dep), db: Session = Depends(get_db)):
-    """Obtener una cita por id.
-
-    Acceso permitido para admin, propietario de la mascota o veterinario asignado.
+async def obtener_cita(
+    cita_id: str,
+    current_user=Depends(get_current_user_dep),
+    service: CitaService = Depends(get_cita_service),
+):
+    """
+    Get a cita by ID.
+    
+    Access allowed for admin, pet owner, or assigned veterinario.
+    
+    Args:
+        cita_id: Cita ID
+        current_user: Current authenticated user
+        service: Injected CitaService
+        
+    Returns:
+        Cita data
     """
     try:
-        cid = _validate_uuid(cita_id, "cita_id")
-        r = db.get(CitaORM, cid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Cita no encontrada")
-        m = db.get(MascotaORM, r.id_mascota)
-        if current_user.role == "admin":
-            pass
-        elif current_user.role == "veterinario":
-            if r.veterinario != current_user.username and (
-                not m or m.propietario != current_user.username
-            ):
-                raise HTTPException(
-                    status_code=403, detail="No autorizado para ver esta cita"
-                )
-        else:
-            if not m or m.propietario != current_user.username:
-                raise HTTPException(
-                    status_code=403, detail="No autorizado para ver esta cita"
-                )
-        owner = None
-        if m and m.propietario:
-            owner = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == m.propietario)
-                .one_or_none()
-            )
-        return {
-            "id_cita": r.id,
-            "id_mascota": r.id_mascota,
-            "mascota_nombre": m.nombre if m else None,
-            "propietario_username": (
-                owner.username if owner else (m.propietario if m else None)
-            ),
-            "propietario_nombre": owner.nombre if owner else None,
-            "propietario_telefono": owner.telefono if owner else None,
-            "fecha": r.fecha,
-            "motivo": r.motivo,
-            "veterinario": r.veterinario,
-            "estado": _normalize_stored_estado(r.estado),
-        }
-    finally:
-        pass
+        return service.get_cita(cita_id, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
+    except Exception as e:
+        logger.error(f"Error getting cita {cita_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener cita"
+        )
 
 
 @router.put("/{cita_id}", response_model=Cita)
 async def actualizar_cita(
-    cita_id: str, cita_update: CitaUpdate, current_user=Depends(get_current_user_dep), db: Session = Depends(get_db)
+    cita_id: str,
+    cita_update: CitaUpdate,
+    current_user=Depends(get_current_user_dep),
+    service: CitaService = Depends(get_cita_service),
 ):
-    """Actualizar una cita.
-
-    No se permite cambiar la mascota asociada ni que un cliente modifique el
-    estado directamente. Si se cambia el veterinario, se valida que exista
-    y sea veterinario. Solo el propietario de la mascota o admin pueden
-    realizar la actualización.
     """
-    update_data = cita_update.model_dump(exclude_unset=True)
+    Update a cita.
+    
+    Only pet owner or admin can update.
+    
+    Args:
+        cita_id: Cita ID
+        cita_update: Update data
+        current_user: Current authenticated user
+        service: Injected CitaService
+        
+    Returns:
+        Updated cita
+    """
     try:
-        cid = _validate_uuid(cita_id, "cita_id")
-        r = db.get(CitaORM, cid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Cita no encontrada")
-        if "id_mascota" in update_data:
-            raise HTTPException(
-                status_code=400,
-                detail="No está permitido actualizar id_mascota mediante este endpoint",
-            )
-        if "estado" in update_data:
-            raise HTTPException(
-                status_code=400,
-                detail="No está permitido actualizar el estado de la cita mediante este endpoint",
-            )
-        if "veterinario" in update_data and update_data["veterinario"] is not None:
-            vet_upd = (
-                db.query(UsuarioORM)
-                .filter(
-                    UsuarioORM.username == update_data["veterinario"],
-                    UsuarioORM.role == "veterinario",
-                )
-                .one_or_none()
-            )
-            if not vet_upd:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Veterinario '{update_data['veterinario']}' no encontrado o no es veterinario",
-                )
-        mascota = db.get(MascotaORM, r.id_mascota)
-        if current_user.role != "admin" and (
-            not mascota or mascota.propietario != current_user.username
-        ):
-            raise HTTPException(
-                status_code=403, detail="No autorizado para modificar esta cita"
-            )
-
-        for field, value in update_data.items():
-            if isinstance(value, _PyEnum):
-                setattr(r, field, value.value)
-            else:
-                setattr(r, field, value)
-        from database.db import set_audit_fields
-
-        set_audit_fields(r, current_user.id, creating=False)
-        db.add(r)
-        db.commit()
-        db.refresh(r)
-        m = db.get(MascotaORM, r.id_mascota)
-        owner = None
-        if m and m.propietario:
-            owner = (
-                db.query(UsuarioORM)
-                .filter(UsuarioORM.username == m.propietario)
-                .one_or_none()
-            )
-        return {
-            "id_cita": r.id,
-            "id_mascota": r.id_mascota,
-            "mascota_nombre": m.nombre if m else None,
-            "propietario_username": (
-                owner.username if owner else (m.propietario if m else None)
-            ),
-            "propietario_nombre": owner.nombre if owner else None,
-            "propietario_telefono": owner.telefono if owner else None,
-            "fecha": r.fecha,
-            "motivo": r.motivo,
-            "veterinario": r.veterinario,
-            "estado": _normalize_stored_estado(r.estado),
-        }
-    except HTTPException:
-        raise
+        return service.update_cita(cita_id, cita_update, current_user)
+    except AppException as e:
+        raise handle_service_exception(e)
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Error al actualizar cita: {e}")
+        logger.error(f"Error updating cita {cita_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al actualizar cita"
+        )
 
 
 @router.delete("/{cita_id}")
-async def cancelar_cita(cita_id: str, current_user=Depends(get_current_user_dep), db: Session = Depends(get_db)):
-    """Cancelar (eliminar) una cita.
-
-    Solo el propietario de la mascota o un administrador pueden cancelar la cita.
+async def cancelar_cita(
+    cita_id: str,
+    current_user=Depends(get_current_user_dep),
+    service: CitaService = Depends(get_cita_service),
+):
+    """
+    Cancel a cita (changes estado to 'cancelada').
+    
+    Only pet owner or admin can cancel.
+    
+    Args:
+        cita_id: Cita ID
+        current_user: Current authenticated user
+        service: Injected CitaService
+        
+    Returns:
+        Cancellation confirmation
     """
     try:
-        cid = _validate_uuid(cita_id, "cita_id")
-        r = db.get(CitaORM, cid)
-        if not r:
-            raise HTTPException(status_code=404, detail="Cita no encontrada")
-        mascota = db.get(MascotaORM, r.id_mascota)
-        if current_user.role != "admin" and (
-            not mascota or mascota.propietario != current_user.username
-        ):
-            raise HTTPException(
-                status_code=403, detail="No autorizado para cancelar esta cita"
-            )
-        db.delete(r)
-        db.commit()
-        return {"message": "Cita cancelada exitosamente"}
-    except HTTPException:
-        raise
+        service.cancel_cita(cita_id, current_user)
+        return {
+            "success": True,
+            "message": "Cita cancelada correctamente",
+            "id_cita": cita_id,
+            "timestamp": datetime.utcnow()
+        }
+    except AppException as e:
+        raise handle_service_exception(e)
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=500, detail=f"Error al cancelar cita: {e}")
+        logger.error(f"Error cancelling cita {cita_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al cancelar cita"
+        )

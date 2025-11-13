@@ -133,3 +133,65 @@ def downgrade():
     op.drop_table('mascotas')
     op.drop_table('usuarios')
     # ### end Alembic commands ###
+def upgrade():
+    # Usuarios
+    op.add_column('usuarios', sa.Column('is_deleted', sa.Boolean(), nullable=False, server_default='0'))
+    op.add_column('usuarios', sa.Column('deleted_at', sa.DateTime(), nullable=True))
+    op.add_column('usuarios', sa.Column('deleted_by', sa.String(36), nullable=True))
+    
+    # Mascotas
+    op.add_column('mascotas', sa.Column('is_deleted', sa.Boolean(), nullable=False, server_default='0'))
+    op.add_column('mascotas', sa.Column('deleted_at', sa.DateTime(), nullable=True))
+    op.add_column('mascotas', sa.Column('deleted_by', sa.String(36), nullable=True))
+    
+    # Citas
+    op.add_column('citas', sa.Column('is_deleted', sa.Boolean(), nullable=False, server_default='0'))
+    op.add_column('citas', sa.Column('deleted_at', sa.DateTime(), nullable=True))
+    op.add_column('citas', sa.Column('deleted_by', sa.String(36), nullable=True))
+    
+    # Vacunas
+    op.add_column('vacunas', sa.Column('is_deleted', sa.Boolean(), nullable=False, server_default='0'))
+    op.add_column('vacunas', sa.Column('deleted_at', sa.DateTime(), nullable=True))
+    op.add_column('vacunas', sa.Column('deleted_by', sa.String(36), nullable=True))
+    
+    # Facturas
+    op.add_column('facturas', sa.Column('is_deleted', sa.Boolean(), nullable=False, server_default='0'))
+    op.add_column('facturas', sa.Column('deleted_at', sa.DateTime(), nullable=True))
+    op.add_column('facturas', sa.Column('deleted_by', sa.String(36), nullable=True))
+    
+    # Recetas
+    op.add_column('recetas', sa.Column('is_deleted', sa.Boolean(), nullable=False, server_default='0'))
+    op.add_column('recetas', sa.Column('deleted_at', sa.DateTime(), nullable=True))
+    op.add_column('recetas', sa.Column('deleted_by', sa.String(36), nullable=True))
+
+
+def downgrade():
+    # Usuarios
+    op.drop_column('usuarios', 'deleted_by')
+    op.drop_column('usuarios', 'deleted_at')
+    op.drop_column('usuarios', 'is_deleted')
+    
+    # Mascotas
+    op.drop_column('mascotas', 'deleted_by')
+    op.drop_column('mascotas', 'deleted_at')
+    op.drop_column('mascotas', 'is_deleted')
+    
+    # Citas
+    op.drop_column('citas', 'deleted_by')
+    op.drop_column('citas', 'deleted_at')
+    op.drop_column('citas', 'is_deleted')
+    
+    # Vacunas
+    op.drop_column('vacunas', 'deleted_by')
+    op.drop_column('vacunas', 'deleted_at')
+    op.drop_column('vacunas', 'is_deleted')
+    
+    # Facturas
+    op.drop_column('facturas', 'deleted_by')
+    op.drop_column('facturas', 'deleted_at')
+    op.drop_column('facturas', 'is_deleted')
+    
+    # Recetas
+    op.drop_column('recetas', 'deleted_by')
+    op.drop_column('recetas', 'deleted_at')
+    op.drop_column('recetas', 'is_deleted')

@@ -14,7 +14,9 @@ from .db import (
     ensure_usuario_exists,
     generar_numero_factura_uuid,
     hash_password,
-    verify_password
+    verify_password,
+    soft_delete,
+    restore_deleted
 )
 
 __all__ = [
@@ -33,5 +35,7 @@ __all__ = [
     "ensure_usuario_exists",
     "generar_numero_factura_uuid",
     "hash_password",
-    "verify_password"
+    "verify_password",
+    "soft_delete",
+    "restore_deleted"
 ]
