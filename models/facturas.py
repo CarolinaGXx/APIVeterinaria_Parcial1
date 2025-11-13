@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional
 from datetime import datetime
 from enum import Enum
@@ -20,6 +20,7 @@ class TipoServicio(str, Enum):
 class FacturaBase(BaseModel):
     id_mascota: UUID
     id_cita: Optional[UUID] = None
+    id_vacuna: Optional[UUID] = None
     fecha_factura: datetime
     tipo_servicio: TipoServicio
     descripcion: str = Field(..., min_length=1, max_length=500)
@@ -29,12 +30,22 @@ class FacturaBase(BaseModel):
     descuento: float = Field(0, ge=0)
 
 class FacturaCreate(BaseModel):
-    id_cita: UUID
+    id_cita: Optional[UUID] = None
+    id_vacuna: Optional[UUID] = None
     tipo_servicio: TipoServicio
     descripcion: str = Field(..., min_length=1, max_length=500)
     valor_servicio: float = Field(..., gt=0)
     iva: float = Field(..., ge=0)
     descuento: float = Field(0, ge=0)
+    
+    @model_validator(mode='after')
+    def validate_cita_or_vacuna(self):
+        """Validar que al menos id_cita o id_vacuna esté presente."""
+        if not self.id_cita and not self.id_vacuna:
+            raise ValueError('Debe proporcionar id_cita o id_vacuna')
+        if self.id_cita and self.id_vacuna:
+            raise ValueError('No puede proporcionar ambos id_cita e id_vacuna')
+        return self
 
 class FacturaUpdate(BaseModel):
     tipo_servicio: Optional[TipoServicio] = None
@@ -49,7 +60,10 @@ class Factura(FacturaBase):
     numero_factura: str
     estado: EstadoFactura = EstadoFactura.pendiente
     total: float
+    veterinario_nombre: Optional[str] = None
+    veterinario_telefono: Optional[str] = None
     mascota_nombre: Optional[str] = None
+    mascota_tipo: Optional[str] = None
     propietario_username: Optional[str] = None
     propietario_nombre: Optional[str] = None
     propietario_telefono: Optional[str] = None

@@ -2,8 +2,34 @@ from .mascotas import Mascota, MascotaCreate, MascotaUpdate, TipoMascota
 from .citas import Cita, CitaCreate, CitaUpdate, EstadoCita
 from .vacunas import Vacuna, VacunaCreate, VacunaUpdate, TipoVacuna
 from .facturas import Factura, FacturaCreate, FacturaUpdate, EstadoFactura, TipoServicio
+from .usuarios import (
+    Usuario, 
+    UsuarioCreate, 
+    Role, 
+    UsuarioUpdateResponse, 
+    UsuarioUpdateRequest,
+    UsuarioPrivilegedCreate,
+    UsuarioRoleUpdate
+)
 from .recetas import Receta, RecetaCreate, RecetaSummary, RecetaUpdate
-from .usuarios import Usuario, UsuarioCreate, Role, UsuarioUpdateResponse, UsuarioUpdateRequest
+from .estadisticas import (
+    EstadisticasCliente,
+    EstadisticasVeterinario,
+    EstadisticasAdmin,
+    EstadisticasResponse
+)
+from .common import (
+    SuccessResponse,
+    ErrorResponse,
+    DeleteResponse,
+    PaginatedResponse,
+    PaginationMeta,
+    HealthCheckResponse,
+    create_success_response,
+    create_error_response,
+    create_delete_response,
+    create_paginated_response
+)
 
 __all__ = [
     # Mascotas
@@ -16,6 +42,14 @@ __all__ = [
     "Factura", "FacturaCreate", "FacturaUpdate", "EstadoFactura", "TipoServicio",
     # Usuarios
     "Usuario", "UsuarioCreate", "Role", "UsuarioUpdateResponse", "UsuarioUpdateRequest",
+    "UsuarioPrivilegedCreate", "UsuarioRoleUpdate",
     # Recetas
-    "Receta", "RecetaCreate", "RecetaSummary", "RecetaUpdate"
+    "Receta", "RecetaCreate", "RecetaSummary", "RecetaUpdate",
+    # Estadísticas
+    "EstadisticasCliente", "EstadisticasVeterinario", "EstadisticasAdmin", "EstadisticasResponse",
+    # Common responses
+    "SuccessResponse", "ErrorResponse", "DeleteResponse", "PaginatedResponse",
+    "PaginationMeta", "HealthCheckResponse",
+    "create_success_response", "create_error_response", "create_delete_response",
+    "create_paginated_response"
 ]
