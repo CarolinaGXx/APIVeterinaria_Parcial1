@@ -18,12 +18,15 @@ class RecetaBase(BaseModel):
     lineas: Optional[List[RecetaLinea]] = None
 
 
-class RecetaCreate(RecetaBase):
-    pass
+class RecetaCreate(BaseModel):
+    """Modelo para crear receta. fecha_emision se genera automáticamente."""
+    id_cita: UUID
+    indicaciones: Optional[str] = None
+    lineas: Optional[List[RecetaLinea]] = None
 
 
 class RecetaUpdate(BaseModel):
-    fecha_emision: Optional[datetime] = None
+    """Modelo para actualizar receta. fecha_emision no se puede modificar."""
     indicaciones: Optional[str] = None
     lineas: Optional[List[RecetaLinea]] = None
 
@@ -32,7 +35,10 @@ class Receta(RecetaBase):
     id_receta: UUID
     id_mascota: UUID
     mascota_nombre: Optional[str] = None
+    mascota_tipo: Optional[str] = None
     veterinario: str
+    veterinario_nombre: Optional[str] = None
+    veterinario_telefono: Optional[str] = None
     propietario_username: Optional[str] = None
     propietario_nombre: Optional[str] = None
     propietario_telefono: Optional[str] = None
@@ -45,7 +51,8 @@ class RecetaSummary(BaseModel):
     mascota_nombre: Optional[str] = None
     fecha_emision: datetime
     veterinario: str
+    veterinario_nombre: Optional[str] = None
+    veterinario_telefono: Optional[str] = None
     propietario_username: Optional[str] = None
     propietario_nombre: Optional[str] = None
     propietario_telefono: Optional[str] = None
-
